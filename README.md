@@ -88,6 +88,7 @@ This project implements a conversational agent that can fetch and discuss news a
 
 1. Start the backend
    ```bash
+   cd backend
    pip install -r requirements.txt
    python news_agent_python.py
    ```
