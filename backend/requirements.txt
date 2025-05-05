@@ -1,7 +1,7 @@
-flask==2.3.3
-flask-cors==4.0.0
-requests==2.31.0
-openai==0.28.1
-python-dotenv==1.0.0
-gunicorn==21.2.0
-aiohttp==3.8.5
+flask==3.1.0
+flask-cors==5.0.1
+requests==2.32.3
+openai==1.76.2
+python-dotenv==1.1.0
+gunicorn==23.0.0
+aiohttp==3.11.18

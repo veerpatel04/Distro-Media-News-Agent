@@ -1,5 +1,5 @@
 import React from 'react';
-import TopicBadge from './TopicBadge';
+import TopicBadge from '../TopicBadge/TopicBadge';
 import './NewsCard.css';
 
 const NewsCard = ({ article, topics = [] }) => {

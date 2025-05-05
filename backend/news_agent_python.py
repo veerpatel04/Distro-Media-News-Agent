@@ -3,17 +3,18 @@ News Agent Backend - Python Implementation
 A conversational AI that fetches news and discusses current events
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 import os
 import requests
 import json
 import time
+import logging
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Union
-import logging
 import openai
 from dotenv import load_dotenv
+import secrets
 
 # Load environment variables
 load_dotenv()
@@ -27,6 +28,11 @@ logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
+secret_key = os.getenv('FLASK_SECRET_KEY')
+if not secret_key:
+    secret_key = secrets.token_hex(32)
+    print('WARNING: FLASK_SECRET_KEY not set in .env, using a random secret key for this session.')
+app.secret_key = secret_key
 CORS(app)  # Enable CORS for all routes
 
 # API Keys
@@ -37,6 +43,10 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
 # Configure OpenAI
 openai.api_key = OPENAI_API_KEY
+
+# Secret key for session management
+SECRET_KEY = os.getenv('SECRET_KEY', os.urandom(24).hex())
+app.secret_key = SECRET_KEY
 
 
 class NewsAgentAPI:
@@ -80,32 +90,43 @@ class NewsAgentAPI:
         
         try:
             # NewsAPI request
-            news_api_url = 'https://newsapi.org/v2/top-headlines'
-            params = {
-                'apiKey': self.news_api_key,
-                'country': country
-            }
-            
-            if category:
-                params['category'] = category
-                
-            response = requests.get(news_api_url, params=params)
-            response.raise_for_status()
-            data = response.json()
-            
-            # Transform the response data
-            headlines = [
-                {
-                    'title': article.get('title'),
-                    'description': article.get('description'),
-                    'url': article.get('url'),
-                    'imageUrl': article.get('urlToImage'),
-                    'source': article.get('source', {}).get('name'),
-                    'publishedAt': article.get('publishedAt'),
-                    'content': article.get('content')
+            if self.news_api_key:
+                logger.info(f"Fetching headlines from NewsAPI for country={country}, category={category}")
+                news_api_url = 'https://newsapi.org/v2/top-headlines'
+                params = {
+                    'apiKey': self.news_api_key,
+                    'country': country
                 }
-                for article in data.get('articles', [])
-            ]
+                
+                if category:
+                    params['category'] = category
+                    
+                response = requests.get(news_api_url, params=params)
+                response.raise_for_status()
+                data = response.json()
+                
+                # Transform the response data
+                headlines = [
+                    {
+                        'title': article.get('title'),
+                        'description': article.get('description'),
+                        'url': article.get('url'),
+                        'imageUrl': article.get('urlToImage'),
+                        'source': article.get('source', {}).get('name'),
+                        'publishedAt': article.get('publishedAt'),
+                        'content': article.get('content')
+                    }
+                    for article in data.get('articles', [])
+                ]
+            # NYT Top Stories API as fallback
+            elif self.nyt_api_key:
+                logger.info(f"Fetching headlines from NYT Top Stories API for section={category or 'home'}")
+                # Map category to NYT section
+                nyt_section = self._map_category_to_nyt_section(category) if category else 'home'
+                headlines = self.fetch_from_nyt_top_stories(nyt_section)
+            else:
+                logger.error("No API keys available for fetching headlines")
+                return []
             
             # Update cache
             self.cache['headlines'][cache_key] = {
@@ -116,7 +137,7 @@ class NewsAgentAPI:
             return headlines
         except Exception as e:
             logger.error(f"Error fetching top headlines: {e}")
-            raise Exception("Failed to fetch headlines")
+            raise Exception(f"Failed to fetch headlines: {str(e)}")
     
     def get_from_publication(self, publication: str) -> List[Dict]:
         """
@@ -141,11 +162,14 @@ class NewsAgentAPI:
             
             # Publication-specific API handling
             if pub_lower in ['new york times', 'nyt']:
+                logger.info("Fetching from NYT API")
                 articles = self.fetch_from_nyt()
             elif pub_lower in ['the guardian', 'guardian']:
+                logger.info("Fetching from Guardian API")
                 articles = self.fetch_from_guardian()
             else:
                 # Default to NewsAPI for other publications
+                logger.info(f"Searching news from {publication} using NewsAPI")
                 articles = self.search_news_by_source(publication)
             
             # Update cache
@@ -179,32 +203,43 @@ class NewsAgentAPI:
             return self.cache['topics'][topic_lower]['data']
         
         try:
-            # NewsAPI request for topic search
-            news_api_url = 'https://newsapi.org/v2/everything'
-            params = {
-                'apiKey': self.news_api_key,
-                'q': topic,
-                'language': language,
-                'sortBy': 'relevancy'
-            }
+            articles = []
             
-            response = requests.get(news_api_url, params=params)
-            response.raise_for_status()
-            data = response.json()
-            
-            # Transform the response data
-            articles = [
-                {
-                    'title': article.get('title'),
-                    'description': article.get('description'),
-                    'url': article.get('url'),
-                    'imageUrl': article.get('urlToImage'),
-                    'source': article.get('source', {}).get('name'),
-                    'publishedAt': article.get('publishedAt'),
-                    'content': article.get('content')
+            # Try NewsAPI first
+            if self.news_api_key:
+                logger.info(f"Searching for topic '{topic}' using NewsAPI")
+                # NewsAPI request for topic search
+                news_api_url = 'https://newsapi.org/v2/everything'
+                params = {
+                    'apiKey': self.news_api_key,
+                    'q': topic,
+                    'language': language,
+                    'sortBy': 'relevancy'
                 }
-                for article in data.get('articles', [])
-            ]
+                
+                response = requests.get(news_api_url, params=params)
+                response.raise_for_status()
+                data = response.json()
+                
+                articles = [
+                    {
+                        'title': article.get('title'),
+                        'description': article.get('description'),
+                        'url': article.get('url'),
+                        'imageUrl': article.get('urlToImage'),
+                        'source': article.get('source', {}).get('name'),
+                        'publishedAt': article.get('publishedAt'),
+                        'content': article.get('content')
+                    }
+                    for article in data.get('articles', [])
+                ]
+            # NYT Article Search API as fallback
+            elif self.nyt_api_key:
+                logger.info(f"Searching for topic '{topic}' using NYT Article Search API")
+                articles = self.search_nyt_articles(topic)
+            else:
+                logger.error("No API keys available for topic search")
+                return []
             
             # Update cache
             self.cache['topics'][topic_lower] = {
@@ -228,28 +263,32 @@ class NewsAgentAPI:
             List of articles from the source
         """
         try:
-            news_api_url = 'https://newsapi.org/v2/everything'
-            params = {
-                'apiKey': self.news_api_key,
-                'sources': self.map_publication_to_news_api_source(source)
-            }
-            
-            response = requests.get(news_api_url, params=params)
-            response.raise_for_status()
-            data = response.json()
-            
-            return [
-                {
-                    'title': article.get('title'),
-                    'description': article.get('description'),
-                    'url': article.get('url'),
-                    'imageUrl': article.get('urlToImage'),
-                    'source': article.get('source', {}).get('name'),
-                    'publishedAt': article.get('publishedAt'),
-                    'content': article.get('content')
+            if self.news_api_key:
+                news_api_url = 'https://newsapi.org/v2/everything'
+                params = {
+                    'apiKey': self.news_api_key,
+                    'sources': self.map_publication_to_news_api_source(source)
                 }
-                for article in data.get('articles', [])
-            ]
+                
+                response = requests.get(news_api_url, params=params)
+                response.raise_for_status()
+                data = response.json()
+                
+                return [
+                    {
+                        'title': article.get('title'),
+                        'description': article.get('description'),
+                        'url': article.get('url'),
+                        'imageUrl': article.get('urlToImage'),
+                        'source': article.get('source', {}).get('name'),
+                        'publishedAt': article.get('publishedAt'),
+                        'content': article.get('content')
+                    }
+                    for article in data.get('articles', [])
+                ]
+            else:
+                logger.warning("NewsAPI key not available, cannot search by source")
+                return []
         except Exception as e:
             logger.error(f"Error searching news from {source}: {e}")
             raise Exception(f"Failed to search news from {source}")
@@ -285,14 +324,33 @@ class NewsAgentAPI:
         pub_lower = publication.lower()
         return mapping.get(pub_lower, pub_lower)
     
+    def _map_category_to_nyt_section(self, category: str) -> str:
+        """Map general news category to NYT section name"""
+        mapping = {
+            'business': 'business',
+            'technology': 'technology',
+            'politics': 'politics',
+            'science': 'science',
+            'health': 'health',
+            'sports': 'sports',
+            'arts': 'arts',
+            'world': 'world',
+            'us': 'us'
+        }
+        return mapping.get(category.lower(), 'home')
+    
     def fetch_from_nyt(self) -> List[Dict]:
         """
-        Fetch from NYT API
+        Fetch from NYT Top Stories API
         
         Returns:
             List of articles from NYT
         """
         try:
+            if not self.nyt_api_key:
+                logger.error("NYT API key not configured")
+                return []
+                
             nyt_api_url = 'https://api.nytimes.com/svc/topstories/v2/home.json'
             params = {
                 'api-key': self.nyt_api_key
@@ -307,7 +365,7 @@ class NewsAgentAPI:
                     'title': article.get('title'),
                     'description': article.get('abstract'),
                     'url': article.get('url'),
-                    'imageUrl': article.get('multimedia')[0].get('url') if article.get('multimedia') else None,
+                    'imageUrl': self._get_nyt_image_url(article),
                     'source': 'The New York Times',
                     'publishedAt': article.get('published_date'),
                     'section': article.get('section')
@@ -318,6 +376,121 @@ class NewsAgentAPI:
             logger.error(f"Error fetching from NYT API: {e}")
             raise Exception("Failed to fetch from The New York Times")
     
+    def fetch_from_nyt_top_stories(self, section: str = 'home') -> List[Dict]:
+        """
+        Fetch from NYT Top Stories API for a specific section
+        
+        Args:
+            section: NYT section name
+            
+        Returns:
+            List of articles from the section
+        """
+        try:
+            if not self.nyt_api_key:
+                logger.error("NYT API key not configured")
+                return []
+                
+            nyt_api_url = f'https://api.nytimes.com/svc/topstories/v2/{section}.json'
+            params = {
+                'api-key': self.nyt_api_key
+            }
+            
+            response = requests.get(nyt_api_url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            return [
+                {
+                    'title': article.get('title'),
+                    'description': article.get('abstract'),
+                    'url': article.get('url'),
+                    'imageUrl': self._get_nyt_image_url(article),
+                    'source': 'The New York Times',
+                    'publishedAt': article.get('published_date'),
+                    'section': article.get('section')
+                }
+                for article in data.get('results', [])
+            ]
+        except Exception as e:
+            logger.error(f"Error fetching from NYT Top Stories API for section {section}: {e}")
+            raise Exception(f"Failed to fetch from NYT section {section}")
+    
+    def search_nyt_articles(self, query: str) -> List[Dict]:
+        """
+        Search articles using NYT Article Search API
+        
+        Args:
+            query: Search query
+            
+        Returns:
+            List of matching articles
+        """
+        try:
+            if not self.nyt_api_key:
+                logger.error("NYT API key not configured")
+                return []
+                
+            nyt_api_url = 'https://api.nytimes.com/svc/search/v2/articlesearch.json'
+            params = {
+                'api-key': self.nyt_api_key,
+                'q': query,
+                'sort': 'newest'
+            }
+            
+            response = requests.get(nyt_api_url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            return [
+                {
+                    'title': doc.get('headline', {}).get('main'),
+                    'description': doc.get('abstract') or doc.get('snippet'),
+                    'url': f"https://www.nytimes.com/{doc.get('web_url', '')}",
+                    'imageUrl': self._get_nyt_search_image_url(doc),
+                    'source': 'The New York Times',
+                    'publishedAt': doc.get('pub_date'),
+                    'section': doc.get('section_name')
+                }
+                for doc in data.get('response', {}).get('docs', [])
+            ]
+        except Exception as e:
+            logger.error(f"Error searching NYT articles: {e}")
+            raise Exception("Failed to search NYT articles")
+    
+    @staticmethod
+    def _get_nyt_image_url(article: Dict) -> Optional[str]:
+        """Extract image URL from NYT article data"""
+        if not article.get('multimedia'):
+            return None
+        
+        # Find the largest image
+        largest_image = None
+        max_width = 0
+        
+        for image in article.get('multimedia', []):
+            width = image.get('width', 0)
+            if width > max_width:
+                max_width = width
+                largest_image = image
+        
+        if largest_image and 'url' in largest_image:
+            return largest_image['url']
+        
+        return None
+    
+    @staticmethod
+    def _get_nyt_search_image_url(doc: Dict) -> Optional[str]:
+        """Extract image URL from NYT article search results"""
+        if not doc.get('multimedia'):
+            return None
+        
+        for multimedia in doc.get('multimedia', []):
+            if multimedia.get('type') == 'image':
+                return f"https://www.nytimes.com/{multimedia.get('url')}"
+        
+        return None
+    
     def fetch_from_guardian(self) -> List[Dict]:
         """
         Fetch from Guardian API
@@ -326,10 +499,15 @@ class NewsAgentAPI:
             List of articles from The Guardian
         """
         try:
+            if not self.guardian_api_key:
+                logger.error("Guardian API key not configured")
+                return []
+                
             guardian_api_url = 'https://content.guardianapis.com/search'
             params = {
                 'api-key': self.guardian_api_key,
-                'show-fields': 'headline,trailText,thumbnail,byline,publication'
+                'show-fields': 'headline,trailText,thumbnail,byline,publication',
+                'section': 'news'
             }
             
             response = requests.get(guardian_api_url, params=params)
@@ -411,6 +589,12 @@ class NewsAgentAPI:
                 for msg in conversation_history
             ]
             
+            # Add system message
+            messages.insert(0, {
+                "role": "system",
+                "content": "You are News Agent, an AI assistant that helps users stay informed about current events. Your goal is to provide accurate, helpful, and informative responses about news and current events. You can search for news, summarize articles, and discuss topics in a conversational way."
+            })
+            
             # Add the new user message
             messages.append({
                 "role": "user",
@@ -462,10 +646,16 @@ class NewsAgent:
         logger.info(f"News Agent initialized with preferences: {self.user_preferences}")
         
         # Get initial headlines
-        headlines = self.news_agent_api.get_top_headlines()
-        headline_titles = [headline.get('title') for headline in headlines[:5]]
-        
-        return f"Welcome to your News Agent! Here are today's top headlines:\n" + "\n".join(headline_titles)
+        try:
+            headlines = self.news_agent_api.get_top_headlines(
+                country=self.user_preferences.get('region', 'us') if self.user_preferences.get('region') != 'global' else 'us'
+            )
+            headline_titles = [headline.get('title') for headline in headlines[:5] if headline.get('title')]
+            
+            return f"Welcome to your News Agent! Here are today's top headlines:\n" + "\n".join(headline_titles)
+        except Exception as e:
+            logger.error(f"Error fetching initial headlines: {e}")
+            return "Welcome to your News Agent! I'm ready to help you find and discuss the latest news."
     
     async def process_request(self, user_input: str) -> str:
         """
@@ -482,20 +672,25 @@ class NewsAgent:
         
         # Detect intent from user input
         intent = self.detect_intent(user_input)
+        logger.info(f"Detected intent: {intent}")
         
         # Process the intent
-        if intent['type'] == 'fetch_headlines':
-            response = await self.handle_headlines_request(intent)
-        elif intent['type'] == 'fetch_specific_publication':
-            response = await self.handle_publication_request(intent['publication'])
-        elif intent['type'] == 'fetch_topic':
-            response = await self.handle_topic_request(intent['topic'])
-        elif intent['type'] == 'discussion':
-            response = await self.discuss_news(user_input)
-        elif intent['type'] == 'update_preferences':
-            response = self.update_user_preferences(intent.get('preferences', {}))
-        else:
-            response = "I'm not sure what you're asking for. You can request the latest headlines, news from a specific publication, or ask about a specific topic."
+        try:
+            if intent['type'] == 'fetch_headlines':
+                response = await self.handle_headlines_request(intent)
+            elif intent['type'] == 'fetch_specific_publication':
+                response = await self.handle_publication_request(intent['publication'])
+            elif intent['type'] == 'fetch_topic':
+                response = await self.handle_topic_request(intent['topic'])
+            elif intent['type'] == 'discussion':
+                response = await self.discuss_news(user_input)
+            elif intent['type'] == 'update_preferences':
+                response = self.update_user_preferences(intent.get('preferences', {}))
+            else:
+                response = await self.discuss_news(user_input)
+        except Exception as e:
+            logger.error(f"Error processing request: {e}")
+            response = f"I'm sorry, I encountered an error while processing your request. Please try again or ask something else."
         
         # Add to conversation history
         self.conversation_history.append({"role": "assistant", "content": response})
@@ -555,10 +750,17 @@ class NewsAgent:
             Headlines response
         """
         try:
-            headlines = self.news_agent_api.get_top_headlines()
-            headline_titles = [headline.get('title') for headline in headlines[:5]]
+            region = self.user_preferences.get('region', 'us')
+            if region == 'global':
+                region = 'us'  # Default to US if global
+                
+            headlines = self.news_agent_api.get_top_headlines(country=region)
+            headline_titles = [headline.get('title') for headline in headlines[:5] if headline.get('title')]
             
-            return f"Here are today's top headlines:\n" + "\n".join(headline_titles)
+            if headline_titles:
+                return f"Here are today's top headlines:\n" + "\n".join(headline_titles)
+            else:
+                return "I'm sorry, I couldn't find any headlines at the moment. Please try again later."
         except Exception as e:
             logger.error(f"Error fetching headlines: {e}")
             return "I'm sorry, I couldn't fetch the latest headlines right now. Please try again later."
@@ -575,9 +777,12 @@ class NewsAgent:
         """
         try:
             articles = self.news_agent_api.get_from_publication(publication)
-            article_titles = [article.get('title') for article in articles[:5]]
+            article_titles = [article.get('title') for article in articles[:5] if article.get('title')]
             
-            return f"Here are the latest articles from {publication}:\n" + "\n".join(article_titles)
+            if article_titles:
+                return f"Here are the latest articles from {publication}:\n" + "\n".join(article_titles)
+            else:
+                return f"I'm sorry, I couldn't find any recent articles from {publication}. Please try another publication or try again later."
         except Exception as e:
             logger.error(f"Error fetching from {publication}: {e}")
             return f"I'm sorry, I couldn't fetch articles from {publication} right now. Please try again later."
@@ -594,9 +799,12 @@ class NewsAgent:
         """
         try:
             articles = self.news_agent_api.get_news_by_topic(topic)
-            article_titles = [article.get('title') for article in articles[:5]]
+            article_titles = [article.get('title') for article in articles[:5] if article.get('title')]
             
-            return f"Here are the latest articles about {topic}:\n" + "\n".join(article_titles)
+            if article_titles:
+                return f"Here are the latest articles about {topic}:\n" + "\n".join(article_titles)
+            else:
+                return f"I'm sorry, I couldn't find any recent articles about {topic}. Please try another topic or try again later."
         except Exception as e:
             logger.error(f"Error fetching articles about {topic}: {e}")
             return f"I'm sorry, I couldn't fetch articles about {topic} right now. Please try again later."
@@ -612,15 +820,13 @@ class NewsAgent:
             Discussion response
         """
         try:
-            # In a real implementation, this would call an LLM to generate a response
-            # based on the user's question and recent news data
             return self.news_agent_api.generate_conversational_response(
                 user_input, 
                 self.conversation_history
             )
         except Exception as e:
             logger.error(f"Error discussing news: {e}")
-            return "I'd be happy to discuss this topic. Based on recent news, there have been several developments in this area..."
+            return "I'd be happy to discuss this topic. Based on recent news, there have been several developments in this area. What specific aspect would you like to know more about?"
     
     def update_user_preferences(self, preferences: Dict) -> str:
         """
@@ -633,7 +839,27 @@ class NewsAgent:
             Confirmation message
         """
         self.user_preferences.update(preferences)
-        return f"Your news preferences have been updated. Your current settings are: {json.dumps(self.user_preferences, indent=2)}"
+        
+        preferences_summary = []
+        if 'favorite_topics' in preferences and preferences['favorite_topics']:
+            topics_str = ', '.join(preferences['favorite_topics'])
+            preferences_summary.append(f"favorite topics: {topics_str}")
+        
+        if 'favorite_publications' in preferences and preferences['favorite_publications']:
+            pubs_str = ', '.join(preferences['favorite_publications'])
+            preferences_summary.append(f"favorite publications: {pubs_str}")
+        
+        if 'region' in preferences:
+            preferences_summary.append(f"region: {preferences['region']}")
+        
+        if 'update_frequency' in preferences:
+            preferences_summary.append(f"update frequency: {preferences['update_frequency']}")
+        
+        if preferences_summary:
+            summary = ', '.join(preferences_summary)
+            return f"Your news preferences have been updated. I'll focus on {summary}."
+        else:
+            return "Your news preferences have been updated."
 
 
 # Store user sessions
@@ -658,15 +884,21 @@ def get_user_session(user_id: str) -> NewsAgent:
 # Routes
 
 @app.route('/api/initialize', methods=['POST'])
-def initialize_session():
+async def initialize_session():
     """Initialize a user session with preferences"""
     try:
         data = request.json
         user_id = data.get('userId')
         preferences = data.get('preferences')
         
+        if not user_id:
+            return jsonify({
+                "success": False,
+                "error": "Missing userId"
+            }), 400
+        
         session = get_user_session(user_id)
-        welcome_message = app.ensure_async(session.initialize)(preferences)
+        welcome_message = await session.initialize(preferences)
         
         # Add initial message to conversation history
         session.conversation_history.append({
@@ -687,7 +919,7 @@ def initialize_session():
 
 
 @app.route('/api/request', methods=['POST'])
-def process_request():
+async def process_request():
     """Process a user request"""
     try:
         data = request.json
@@ -701,7 +933,7 @@ def process_request():
             }), 400
         
         session = get_user_session(user_id)
-        response = app.ensure_async(session.process_request)(user_input)
+        response = await session.process_request(user_input)
         
         return jsonify({
             "success": True,
@@ -871,6 +1103,57 @@ def update_preferences(user_id):
         }), 500
 
 
+# Health check route
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat()
+    })
+
+
+# Serve React app in production
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve(path):
+    """Serve React app in production"""
+    # If the route is an API endpoint, let Flask handle it
+    if path.startswith('api/'):
+        return app.full_dispatch_request()
+    
+    # For all other routes, serve the React app
+    return app.send_static_file('index.html')
+
+
+# Error handler for 404
+@app.errorhandler(404)
+def not_found(e):
+    # If the request is for API, return JSON error
+    if request.path.startswith('/api/'):
+        return jsonify({
+            "success": False,
+            "error": "The requested endpoint was not found"
+        }), 404
+    
+    # For all other routes, serve the React app
+    return app.send_static_file('index.html')
+
+
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    debug = os.getenv('DEBUG', 'False').lower() in ('true', '1', 't')
+    
+    # Print startup information
+    logger.info(f"Starting News Agent server on port {port}")
+    logger.info(f"Debug mode: {debug}")
+    
+    # Check API keys
+    if not NEWS_API_KEY and not NYT_API_KEY and not GUARDIAN_API_KEY:
+        logger.warning("No news API keys configured. The application may not work correctly.")
+    
+    if not OPENAI_API_KEY:
+        logger.warning("OpenAI API key not configured. Conversational features will not work.")
+    
+    # Start the server
+    app.run(host='0.0.0.0', port=port, debug=debug)

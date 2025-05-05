@@ -81,10 +81,4 @@ const Sidebar = ({ activeCategory, onCategoryChange, onOpenPreferences }) => {
   );
 };
 
-export { default as Sidebar } from './Sidebar/Sidebar';
-export { default as Header } from './Header/Header';
-export { default as ChatContainer } from './ChatContainer/ChatContainer';
-export { default as NewsCard } from './NewsCard/NewsCard';
-export { default as HeadlinePreview } from './HeadlinePreview/HeadlinePreview';
-export { default as TopicBadge } from './TopicBadge/TopicBadge';
-export { default as PreferencesModal } from './PreferencesModal/PreferencesModal';
+export default Sidebar;
