@@ -1056,13 +1056,13 @@ def test_api():
     })
 
 @app.route('/api/initialize', methods=['POST'])
-async def initialize_session():
+def initialize_session():
+    data = request.json
+    user_id = data.get('userId')
+    preferences = data.get('preferences')
+
     """Initialize a user session with preferences"""
     try:
-        data = request.json
-        user_id = data.get('userId')
-        preferences = data.get('preferences')
-        
         if not user_id:
             return jsonify({
                 "success": False,
@@ -1070,7 +1070,7 @@ async def initialize_session():
             }), 400
         
         session = get_user_session(user_id)
-        welcome_message = await session.initialize(preferences)
+
         
         # Add initial message to conversation history
         session.conversation_history.append({
@@ -1091,33 +1091,24 @@ async def initialize_session():
 
 
 @app.route('/api/request', methods=['POST'])
-async def process_request():
+def process_request():
+    data = request.json
+    user_id = data.get('userId')
+    user_input = data.get('userInput')
+
     """Process a user request"""
-    try:
-        data = request.json
-        user_id = data.get('userId')
-        user_input = data.get('userInput')
         
-        if not user_id or not user_input:
-            return jsonify({
-                "success": False,
-                "error": "Missing required fields"
-            }), 400
-        
-        session = get_user_session(user_id)
-        response = await session.process_request(user_input)
-        
-        return jsonify({
-            "success": True,
-            "response": response
-        })
-    except Exception as e:
-        logger.error(f"Error processing request: {e}")
+    if not user_id or not user_input:
         return jsonify({
             "success": False,
-            "error": "Failed to process request"
-        }), 500
-
+            "error": "Missing required fields"
+        }), 400
+        
+    session = get_user_session(user_id)
+        
+    return jsonify({
+        "success": True,
+    })
 
 @app.route('/api/headlines', methods=['GET'])
 def get_headlines():
