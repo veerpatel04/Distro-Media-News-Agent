@@ -1,7 +1,8 @@
+
 import React, { createContext, useState, useEffect, useContext } from 'react';
 import { 
   initializeSession, 
-  processRequest, 
+  processRequest,    // now returns the AI text reply
   getConversationHistory, 
   updatePreferences 
 } from '../services/api';
@@ -10,92 +11,94 @@ import {
 export const UserContext = createContext();
 
 export const UserProvider = ({ children }) => {
-  // Generate a random user ID if not in localStorage
+  // Generate or load a persistent user ID
   const [userId] = useState(() => {
-    const savedUserId = localStorage.getItem('newsAgentUserId');
-    if (savedUserId) return savedUserId;
-    
-    const newUserId = `user-${Math.random().toString(36).substring(2, 9)}`;
-    localStorage.setItem('newsAgentUserId', newUserId);
-    return newUserId;
+    const saved = localStorage.getItem('newsAgentUserId');
+    if (saved) return saved;
+    const newId = `user-${Math.random().toString(36).substring(2, 9)}`;
+    localStorage.setItem('newsAgentUserId', newId);
+    return newId;
   });
-  
-  // User state
+
+  // Preferences state
   const [preferences, setPreferences] = useState({
     favorite_topics: ['technology', 'business'],
     favorite_publications: ['BBC', 'Wall Street Journal'],
     update_frequency: 'daily',
     region: 'us'
   });
-  const [messages, setMessages] = useState([]);
+  const [messages, setMessages]       = useState([]);
   const [isInitialized, setIsInitialized] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState(null);
-  
-  // Initialize user session on mount
+  const [isLoading, setIsLoading]     = useState(false);
+  const [error, setError]             = useState(null);
+
+  // Load saved preferences & init session on mount
   useEffect(() => {
-    // Load saved preferences from localStorage if available
-    const savedPreferences = localStorage.getItem('newsAgentPreferences');
-    if (savedPreferences) {
+    const savedPrefs = localStorage.getItem('newsAgentPreferences');
+    if (savedPrefs) {
       try {
-        setPreferences(JSON.parse(savedPreferences));
-      } catch (err) {
-        console.error('Error parsing saved preferences:', err);
-      }
+        setPreferences(JSON.parse(savedPrefs));
+      } catch {}
     }
-    
-    // Initialize session
     initializeUserSession();
   }, [userId]);
-  
-  // Save preferences to localStorage when they change
+
+  // Persist preferences
   useEffect(() => {
     localStorage.setItem('newsAgentPreferences', JSON.stringify(preferences));
   }, [preferences]);
-  
-  // Initialize user session
+
+  // Initialize the backend session
   const initializeUserSession = async () => {
     setIsLoading(true);
     try {
-      const response = await initializeSession(userId, preferences);
+      const resp = await initializeSession(userId, preferences);
       setMessages([{
         role: 'assistant',
-        content: response.message
+        content: resp.message
       }]);
       setIsInitialized(true);
       setError(null);
     } catch (err) {
       console.error('Error initializing session:', err);
-      setError('Failed to initialize. Please refresh the page.');
+      setError('Failed to initialize. Please refresh.');
     } finally {
       setIsLoading(false);
     }
   };
-  
-  // Send message to AI
+
+  // Send a free-form message to the AI
   const sendMessage = async (userInput) => {
-    if (!userInput.trim() || isLoading) return;
-    
-    // Add user message to chat
-    setMessages(prev => [...prev, {
-      role: 'user',
-      content: userInput
-    }]);
-    
+    if (!userInput.trim() || isLoading) return null;
+
+    // 1️⃣ Add the user’s message
+    setMessages(prev => [
+      ...prev,
+      { role: 'user', content: userInput }
+    ]);
     setIsLoading(true);
-    
+
     try {
-      // Process the request
-      const response = await processRequest(userId, userInput);
-      
-      // Add assistant response to chat
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: response.response
-      }]);
-      
+      // 2️⃣ Call the new POST /api/request endpoint
+      const aiReplyText = await processRequest(userId, userInput);
+
+      // 3️⃣ Add the assistant’s reply
+      setMessages(prev => [
+        ...prev,
+        { role: 'assistant', content: aiReplyText }
+      ]);
+
+      // 🔊 4️⃣ Speak the AI’s reply aloud
+      if ('speechSynthesis' in window) {
+        const utterance = new SpeechSynthesisUtterance(aiReplyText);
+        // Optional: tweak rate/pitch
+        utterance.rate = 1.0;
+        utterance.pitch = 1.0;
+        window.speechSynthesis.speak(utterance);
+      }
+
       setError(null);
-      return response;
+      return aiReplyText;
     } catch (err) {
       console.error('Error processing message:', err);
       setError('Failed to process your request. Please try again.');
@@ -104,66 +107,72 @@ export const UserProvider = ({ children }) => {
       setIsLoading(false);
     }
   };
-  
-  // Load conversation history
+
+
+  // Load past history
   const loadConversationHistory = async () => {
     setIsLoading(true);
     try {
-      const response = await getConversationHistory(userId);
-      if (response.success) {
-        setMessages(response.history);
+      const resp = await getConversationHistory(userId);
+      if (resp.success) {
+        setMessages(resp.history);
       }
       setError(null);
     } catch (err) {
-      console.error('Error loading conversation history:', err);
+      console.error('Error loading history:', err);
       setError('Failed to load conversation history.');
     } finally {
       setIsLoading(false);
     }
   };
-  
-  // Update user preferences
-  const savePreferences = async (newPreferences) => {
+
+  // Update preferences
+  const savePreferences = async (newPrefs) => {
     setIsLoading(true);
     try {
-      await updatePreferences(userId, newPreferences);
-      setPreferences(newPreferences);
+      await updatePreferences(userId, newPrefs);
+      setPreferences(newPrefs);
       setError(null);
-      
-      // Inform the user about the preference change
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: `I've updated your preferences. You'll now receive news about ${newPreferences.favorite_topics.join(', ')} and from sources like ${newPreferences.favorite_publications.join(', ')}.`
-      }]);
-      
+
+      setMessages(prev => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: `Preferences updated: topics = ${newPrefs.favorite_topics.join(
+            ', '
+          )}; sources = ${newPrefs.favorite_publications.join(', ')}.`
+        }
+      ]);
       return true;
     } catch (err) {
       console.error('Error updating preferences:', err);
-      setError('Failed to update preferences. Please try again.');
+      setError('Failed to update preferences.');
       return false;
     } finally {
       setIsLoading(false);
     }
   };
-  
+
   return (
-    <UserContext.Provider value={{
-      userId,
-      preferences,
-      messages,
-      isInitialized,
-      isLoading,
-      error,
-      sendMessage,
-      loadConversationHistory,
-      savePreferences
-    }}>
+    <UserContext.Provider
+      value={{
+        userId,
+        preferences,
+        messages,
+        isInitialized,
+        isLoading,
+        error,
+        sendMessage,
+        loadConversationHistory,
+        savePreferences
+      }}
+    >
       {children}
     </UserContext.Provider>
   );
 };
 
-// Custom hook for using User Context
+// Custom hook
 export const useUser = () => useContext(UserContext);
 
 export default UserContext;

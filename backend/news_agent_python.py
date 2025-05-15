@@ -682,7 +682,7 @@ class NewsAgentAPI:
                 articles_context += f"DESCRIPTION: {article.get('description') or 'No description available'}\n\n"
             
             # Generate the completion
-            response = openai.Completion.create(
+            response = openai.completions.create(
                 model="gpt-3.5-turbo-instruct",
                 prompt=f"{prompt}\n\nContext from recent news articles:\n{articles_context}",
                 max_tokens=500,
@@ -731,7 +731,7 @@ class NewsAgentAPI:
             })
             
             # Generate the completion
-            response = openai.ChatCompletion.create(
+            response = openai.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=messages,
                 max_tokens=500,
@@ -837,54 +837,73 @@ class NewsAgent:
         Returns:
             Intent dictionary
         """
-        input_lower = user_input.lower()
-        
-        # Check for headline requests
-        if any(phrase in input_lower for phrase in ['headlines', 'news', 'today', 'breaking news', 'latest headlines']):
+        import re
+
+        input_lower = user_input.lower().strip()
+
+        # ─── 1) Free-form discussion whenever user asks “tell me about …” ───
+        if input_lower.startswith('tell me about'):
+            return {'type': 'discussion'}
+
+        # ─── 2) Also treat “about <something> news” as discussion ───
+        m = re.search(r'about\s+(.+?)\s+news', user_input, re.IGNORECASE)
+        if m:
+            return {'type': 'discussion'}
+
+        # ─── 3) Explicit headline requests ───
+        if any(phrase in input_lower for phrase in [
+            'headlines', 'today', 'breaking news', 'latest headlines'
+        ]):
             intent = {'type': 'fetch_headlines'}
-            
-            # Check for category mentions
-            categories = ['politics', 'business', 'technology', 'sports', 'health', 'science', 'world']
+            # category sniffing
+            categories = [
+                'politics', 'business', 'technology',
+                'sports', 'health', 'science', 'world'
+            ]
             for category in categories:
                 if category in input_lower:
                     intent['category'] = category
                     break
-            
             return intent
-        
-        # Check for specific publication requests
-        publications = ['wall street journal', 'new york times', 'washington post', 'cnn', 'bbc', 'fox news']
+
+        # ─── 4) Specific publication requests ───
+        publications = [
+            'wall street journal', 'new york times',
+            'washington post', 'cnn', 'bbc', 'fox news'
+        ]
         for pub in publications:
             if pub in input_lower:
                 return {'type': 'fetch_specific_publication', 'publication': pub}
-        
-        # Check for topic requests
-        topics = ['politics', 'business', 'technology', 'health', 'science', 'sports', 'entertainment']
+
+        # ─── 5) Simple topic keywords ───
+        topics = [
+            'politics', 'business', 'technology',
+            'health', 'science', 'sports', 'entertainment'
+        ]
         for topic in topics:
             if topic in input_lower:
                 return {'type': 'fetch_topic', 'topic': topic}
-        
-        # Check for specific events/locations
-        if any(word in input_lower for word in ['about', 'regarding', 'on', 'related to']):
-            # Try to extract topic
-            words = input_lower.split()
-            for i, word in enumerate(words):
-                if word in ['about', 'regarding', 'on', 'related to']:
-                    if i + 1 < len(words):
-                        return {'type': 'fetch_topic', 'topic': words[i + 1]}
-        
-        # Check for preference updates
+
+        # ─── 6) Generic “about/related to” fallback ───
+        # (still ends up fetching topic titles)
+        fallback = re.search(r'(?:about|regarding|on|related to)\s+(.+)', input_lower)
+        if fallback:
+            t = fallback.group(1).split()[0]
+            return {'type': 'fetch_topic', 'topic': t}
+
+        # ─── 7) Preference updates ───
         if any(word in input_lower for word in ['preferences', 'settings', 'configure']):
             return {'type': 'update_preferences'}
-        
-        # Check for specific events/locations
+
+        # ─── 8) Hard-coded specific keywords ───
         specific_keywords = ['ukraine', 'election', 'covid', 'climate']
         for keyword in specific_keywords:
             if keyword in input_lower:
                 return {'type': 'fetch_topic', 'topic': keyword}
-        
-        # Default to discussion
+
+        # ─── 9) Default to open-ended discussion ───
         return {'type': 'discussion'}
+
     
     async def handle_headlines_request(self, intent: Dict) -> str:
         """
@@ -1090,24 +1109,25 @@ def initialize_session():
         }), 500
 
 
+import asyncio
+
 @app.route('/api/request', methods=['POST'])
 def process_request():
-    data = request.json
-    user_id = data.get('userId')
+    data       = request.json
+    user_id    = data.get('userId')
     user_input = data.get('userInput')
 
-    """Process a user request"""
-        
     if not user_id or not user_input:
-        return jsonify({
-            "success": False,
-            "error": "Missing required fields"
-        }), 400
-        
+        return jsonify({ "success": False, "error": "Missing required fields" }), 400
+
     session = get_user_session(user_id)
-        
+
+    # ↳ use asyncio.run instead of get_event_loop()
+    response_text = asyncio.run(session.process_request(user_input))
+
     return jsonify({
         "success": True,
+        "message": response_text
     })
 
 @app.route('/api/headlines', methods=['GET'])
